@@ -1,0 +1,19 @@
+[package]
+name = "teensy-keyboard-bridge"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+cortex-m = { version = "0.7", features = ["critical-section-single-core"] }
+rtic = { version = "2", features = ["thumbv7-backend"] }
+rtic-monotonics = { version = "2", default-features = false, features = ["cortex-m-systick"] }
+teensy4-panic = { version = "0.2" }
+teensy4-bsp = { version = "0.5", features = [ "rt" ] }
+usb-device = "0.3"
+log = "0.4"
+usbd-hid = "0.8"
+usbd-serial = "0.2"
+
+[patch.crates-io.teensy4-bsp]
+git = "https://github.com/tritoke/teensy4-rs"
+rev = "0ddfd4d84100898b2b7216e6369fe1990f436373"
