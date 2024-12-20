@@ -10,6 +10,8 @@ use teensy4_panic as _;
 
 #[rtic::app(device = teensy4_bsp, peripherals = false)]
 mod app {
+    use circular_buffer::CircularBuffer;
+    use rtic_monotonics::rtic_time::embedded_hal::digital::OutputPin;
     use teensy4_bsp::{self as bsp, board};
 
     use bsp::hal::{
@@ -22,7 +24,7 @@ mod app {
         device::{UsbDevice, UsbDeviceBuilder, UsbDeviceState, UsbVidPid},
     };
     use usbd_hid::{
-        descriptor::{KeyboardReport, SerializedDescriptor as _},
+        descriptor::{KeyboardReport, KeyboardUsage, SerializedDescriptor as _},
         hid_class::HIDClass,
     };
 
@@ -35,8 +37,8 @@ mod app {
     const LPUART_POLL_INTERVAL_MS: u32 = board::PERCLK_FREQUENCY / 1_000 * 100;
     /// The USB GPT timer we use to (infrequently) send mouse updates.
     const GPT_INSTANCE: gpt::Instance = gpt::Instance::Gpt0;
-    /// How frequently should we push mouse updates to the host?
-    const MOUSE_UPDATE_INTERVAL_MS: u32 = 200;
+    /// How frequently should we push keyboard updates to the host?
+    const KEYBOARD_UPDATE_INTERVAL_MS: u32 = 20;
 
     /// This allocation is shared across all USB endpoints. It needs to be large
     /// enough to hold the maximum packet size for *all* endpoints. If you start
@@ -46,10 +48,6 @@ mod app {
     /// of endpoints; we're not using all the endpoints in this example.
     static EP_STATE: EndpointState = EndpointState::max_endpoints();
 
-    use core::{iter::Cycle, slice::Iter};
-    type MessageIter = Cycle<Iter<'static, u8>>;
-    const MESSAGE: &[u8] = b"Ia! Ia! Cthulhu fhtagn!  ";
-
     type Bus = BusAdapter;
 
     #[local]
@@ -57,12 +55,13 @@ mod app {
         class: HIDClass<'static, Bus>,
         device: UsbDevice<'static, Bus>,
         led: board::Led,
-        message: MessageIter,
         lpuart2: board::Lpuart2,
     }
 
     #[shared]
-    struct Shared {}
+    struct Shared {
+        keys_to_press: circular_buffer::CircularBuffer<20, KeyboardReport>,
+    }
 
     #[init(local = [bus: Option<UsbBusAllocator<Bus>> = None])]
     fn init(ctx: init::Context) -> (Shared, Local) {
@@ -95,7 +94,7 @@ mod app {
             gpt.clear_elapsed();
             gpt.set_interrupt_enabled(true);
             gpt.set_mode(gpt::Mode::Repeat);
-            gpt.set_load(MOUSE_UPDATE_INTERVAL_MS * 1000);
+            gpt.set_load(KEYBOARD_UPDATE_INTERVAL_MS * 1000);
             gpt.reset();
             gpt.run();
         });
@@ -113,28 +112,28 @@ mod app {
             .build();
 
         (
-            Shared {},
+            Shared {
+                keys_to_press: CircularBuffer::new(),
+            },
             Local {
                 class,
                 device,
                 led,
-                message: MESSAGE.iter().cycle(),
                 lpuart2,
             },
         )
     }
 
-    // #[task(binds = USB_OTG1, local = [device, class, led, message, configured: bool = false], priority = 2)]
-    #[task(binds = USB_OTG1, local = [device, class, message, configured: bool = false], priority = 2)]
+    #[task(binds = USB_OTG1, local = [device, class, led, configured: bool = false], shared = [keys_to_press], priority = 2)]
     fn usb1(ctx: usb1::Context) {
         let usb1::LocalResources {
             class,
             device,
-            // led,
+            led,
             configured,
-            message,
             ..
         } = ctx.local;
+        let mut keys_to_press = ctx.shared.keys_to_press;
 
         device.poll(&mut [class]);
 
@@ -147,68 +146,40 @@ mod app {
             *configured = false;
         }
 
-        if *configured {
-            let elapsed = device.bus().gpt_mut(GPT_INSTANCE, |gpt| {
-                let elapsed = gpt.is_elapsed();
-                while gpt.is_elapsed() {
-                    gpt.clear_elapsed();
-                }
-                elapsed
-            });
+        if !*configured {
+            return;
+        }
 
-            if elapsed {
-                // led.toggle();
-                // let code = *message.next().unwrap();
-                // if let Some(report) = translate_char(code) {
-                //     class.push_input(&report).ok();
-                // }
+        let elapsed = device.bus().gpt_mut(GPT_INSTANCE, |gpt| {
+            let elapsed = gpt.is_elapsed();
+            while gpt.is_elapsed() {
+                gpt.clear_elapsed();
             }
+            elapsed
+        });
+
+        if !elapsed {
+            return;
+        }
+
+        if let Some(key) = keys_to_press.lock(|keys| keys.pop_front()) {
+            class.push_input(&key).ok();
+            led.set_high().ok();
+        } else {
+            class.push_input(&KeyboardReport::default()).ok();
+            led.set_low().ok();
         }
     }
 
-    fn translate_char(ch: u8) -> Option<KeyboardReport> {
-        fn simple_kr(modifier: u8, keycodes: [u8; 6]) -> Option<KeyboardReport> {
-            Some(KeyboardReport {
-                modifier,
-                reserved: 0,
-                leds: 0,
-                keycodes,
-            })
-        }
-
-        match ch {
-            b'a'..=b'z' => {
-                let code = ch - b'a' + 4;
-                simple_kr(0, [code, 0, 0, 0, 0, 0])
-            }
-            b'A'..=b'Z' => {
-                let code = ch - b'A' + 4;
-                simple_kr(2, [code, 0, 0, 0, 0, 0])
-            }
-            b'!'..=b')' => {
-                let code = ch - b'!' + 0x1e;
-                simple_kr(2, [code, 0, 0, 0, 0, 0])
-            }
-            b' ' => simple_kr(0, [0x2c, 0, 0, 0, 0, 0]),
-            _ => {
-                log::error!("Unsupported character '{}'", ch);
-                None
-            }
-        }
-    }
-
-    #[task(binds = LPUART2, local = [lpuart2, led])]
-    fn lpuart2_interrupt(cx: lpuart2_interrupt::Context) {
+    #[task(binds = LPUART2, local = [lpuart2, state: StateMachine = StateMachine::Start], shared = [keys_to_press], priority = 3)]
+    fn lpuart2_interrupt(ctx: lpuart2_interrupt::Context) {
         use lpuart::Status;
-        let lpuart2 = cx.local.lpuart2;
-        let led = cx.local.led;
+        let lpuart2 = ctx.local.lpuart2;
+        let state = ctx.local.state;
+        let mut keys_to_press = ctx.shared.keys_to_press;
 
         let status = lpuart2.status();
         lpuart2.clear_status(Status::W1C);
-
-        // if lpuart2.status().contains(Status::TRANSMIT_EMPTY) {
-        //     lpuart2.write_byte(b'a');
-        // }
 
         if status.contains(Status::RECEIVE_FULL) {
             loop {
@@ -216,10 +187,119 @@ mod app {
                 if data.flags().contains(lpuart::ReadFlags::RXEMPT) {
                     break;
                 }
-                if lpuart2.status().contains(Status::TRANSMIT_EMPTY) {
-                    lpuart2.write_byte(data.into());
-                    led.toggle();
+
+                if let Some(key) = state.step(data.into()) {
+                    keys_to_press.lock(|keys| {
+                        keys.push_back(key);
+                    });
                 }
+            }
+        }
+    }
+
+    // State machine for parsing some ANSI escape sequences
+    #[derive(Default, PartialEq, Eq)]
+    enum StateMachine {
+        /// We've seen nothing
+        #[default]
+        Start,
+
+        /// We've just escape - 0x1B
+        Escape,
+
+        /// We've seen 0x1B then 0x5B
+        Bracket,
+    }
+
+    impl StateMachine {
+        fn step(&mut self, data: u8) -> Option<KeyboardReport> {
+            match self {
+                StateMachine::Start if data == 0x1B => *self = StateMachine::Escape,
+                StateMachine::Start => return translate_char(data),
+                StateMachine::Escape if data == b'[' => *self = StateMachine::Bracket,
+                StateMachine::Bracket => {
+                    *self = StateMachine::Start;
+                    return match data {
+                        b'A' => simple_kr(MOD_NORM, KeyboardUsage::KeyboardUpArrow),
+                        b'B' => simple_kr(MOD_NORM, KeyboardUsage::KeyboardDownArrow),
+                        b'C' => simple_kr(MOD_NORM, KeyboardUsage::KeyboardRightArrow),
+                        b'D' => simple_kr(MOD_NORM, KeyboardUsage::KeyboardLeftArrow),
+                        _ => None,
+                    };
+                }
+
+                _ => *self = StateMachine::Start,
+            }
+
+            None
+        }
+    }
+
+    // no modifier
+    const MOD_NORM: u8 = 0;
+
+    // "alt" modifier - left shift
+    const MOD_ALT: u8 = 2;
+
+    fn simple_kr(modifier: u8, keycode: impl Into<KeyboardUsage>) -> Option<KeyboardReport> {
+        Some(KeyboardReport {
+            modifier,
+            reserved: 0,
+            leds: 0,
+            keycodes: [keycode.into() as u8, 0, 0, 0, 0, 0],
+        })
+    }
+
+    fn translate_char(ch: u8) -> Option<KeyboardReport> {
+        // this is a slightly dumb mapping from the UK keymap back to keyboard codes lol
+        match ch {
+            b'a'..=b'z' => {
+                let base = KeyboardUsage::KeyboardAa as u8;
+                let code = base + (ch - b'a');
+                simple_kr(MOD_NORM, code)
+            }
+            b'A'..=b'Z' => {
+                let base = KeyboardUsage::KeyboardAa as u8;
+                let code = base + (ch - b'A');
+                simple_kr(MOD_ALT, code)
+            }
+            b'1'..=b'9' => {
+                let base = KeyboardUsage::Keyboard1Exclamation as u8;
+                let code = base + (ch - b'1');
+                simple_kr(MOD_NORM, code)
+            }
+            b'0' => simple_kr(MOD_NORM, KeyboardUsage::Keyboard0CloseParens),
+            b'!' => simple_kr(MOD_ALT, KeyboardUsage::Keyboard1Exclamation),
+            b'"' => simple_kr(MOD_ALT, KeyboardUsage::Keyboard2At),
+            b'$' => simple_kr(MOD_ALT, KeyboardUsage::Keyboard4Dollar),
+            b'%' => simple_kr(MOD_ALT, KeyboardUsage::Keyboard5Percent),
+            b'^' => simple_kr(MOD_ALT, KeyboardUsage::Keyboard6Caret),
+            b'&' => simple_kr(MOD_ALT, KeyboardUsage::Keyboard7Ampersand),
+            b'*' => simple_kr(MOD_ALT, KeyboardUsage::Keyboard8Asterisk),
+            b'(' => simple_kr(MOD_ALT, KeyboardUsage::Keyboard9OpenParens),
+            b')' => simple_kr(MOD_ALT, KeyboardUsage::Keyboard0CloseParens),
+            b' ' => simple_kr(MOD_NORM, KeyboardUsage::KeyboardSpacebar),
+            b'-' => simple_kr(MOD_NORM, KeyboardUsage::KeyboardDashUnderscore),
+            b'_' => simple_kr(MOD_ALT, KeyboardUsage::KeyboardDashUnderscore),
+            b'=' => simple_kr(MOD_NORM, KeyboardUsage::KeyboardEqualPlus),
+            b'+' => simple_kr(MOD_ALT, KeyboardUsage::KeyboardEqualPlus),
+            b'[' => simple_kr(MOD_NORM, KeyboardUsage::KeyboardOpenBracketBrace),
+            b'{' => simple_kr(MOD_ALT, KeyboardUsage::KeyboardOpenBracketBrace),
+            b']' => simple_kr(MOD_NORM, KeyboardUsage::KeyboardCloseBracketBrace),
+            b'}' => simple_kr(MOD_ALT, KeyboardUsage::KeyboardCloseBracketBrace),
+            b'\'' => simple_kr(MOD_NORM, KeyboardUsage::KeyboardSingleDoubleQuote),
+            b'\\' => simple_kr(MOD_NORM, KeyboardUsage::KeyboardBackslashBar),
+            b'|' => simple_kr(MOD_ALT, KeyboardUsage::KeyboardBackslashBar),
+            b';' => simple_kr(MOD_NORM, KeyboardUsage::KeyboardSemiColon),
+            b':' => simple_kr(MOD_ALT, KeyboardUsage::KeyboardSemiColon),
+            b'/' => simple_kr(MOD_NORM, KeyboardUsage::KeyboardSlashQuestion),
+            b'?' => simple_kr(MOD_ALT, KeyboardUsage::KeyboardSlashQuestion),
+            b'\t' => simple_kr(MOD_NORM, KeyboardUsage::KeyboardTab),
+            b'\r' => simple_kr(MOD_NORM, KeyboardUsage::KeyboardEnter),
+            127 => simple_kr(MOD_NORM, KeyboardUsage::KeyboardBackspace),
+            _ => {
+                log::error!("Unsupported character '{}'", ch);
+                None
             }
         }
     }

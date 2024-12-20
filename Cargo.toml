@@ -13,6 +13,7 @@ usb-device = "0.3"
 log = "0.4"
 usbd-hid = "0.8"
 usbd-serial = "0.2"
+circular-buffer = { version = "0.1.9", default-features = false }
 
 [patch.crates-io.teensy4-bsp]
 git = "https://github.com/tritoke/teensy4-rs"
