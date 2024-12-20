@@ -8,14 +8,12 @@
 
 use teensy4_panic as _;
 
-// TODO: CLONE EVERYTHING LOCALLY AND FIX IT URSELF
 #[rtic::app(device = teensy4_bsp, peripherals = false)]
 mod app {
-    use teensy4_bsp as bsp;
+    use teensy4_bsp::{self as bsp, board};
 
-    use bsp::board;
     use bsp::hal::{
-        // self,
+        lpuart,
         usbd::{gpt, BusAdapter, EndpointMemory, EndpointState, Speed},
     };
 
@@ -35,12 +33,6 @@ mod app {
     const PRODUCT: &str = "teensy-keyboard-bridge";
     /// How frequently should we poll the logger?
     const LPUART_POLL_INTERVAL_MS: u32 = board::PERCLK_FREQUENCY / 1_000 * 100;
-    /// Change me to change how log messages are serialized.
-    ///
-    /// If changing to `Defmt`, you'll need to update the logging macros in
-    /// this example. You'll also need to make sure the USB device you're debugging
-    /// uses `defmt`.
-    // const FRONTEND: board::logging::Frontend = board::logging::Frontend::Log;
     /// The USB GPT timer we use to (infrequently) send mouse updates.
     const GPT_INSTANCE: gpt::Instance = gpt::Instance::Gpt0;
     /// How frequently should we push mouse updates to the host?
@@ -65,8 +57,8 @@ mod app {
         class: HIDClass<'static, Bus>,
         device: UsbDevice<'static, Bus>,
         led: board::Led,
-        // timer: hal::pit::Pit<0>,
         message: MessageIter,
+        lpuart2: board::Lpuart2,
     }
 
     #[shared]
@@ -76,10 +68,9 @@ mod app {
     fn init(ctx: init::Context) -> (Shared, Local) {
         let board::Resources {
             pit: (mut timer, _, _, _),
-            // dma,
             usb: usbd,
-            // mut gpt1,
             pins,
+            lpuart2,
             mut gpio2,
             ..
         } = board::t41(board::instances());
@@ -89,14 +80,13 @@ mod app {
         timer.set_interrupt_enable(true);
         timer.enable();
 
-        // let dma_a = dma[board::BOARD_DMA_A_INDEX].take().unwrap();
-        // let poller = board::logging::lpuart(FRONTEND, console, dma_a);
-
-        // let usbd = hal::usbd::Instances {
-        //     usb: usb1,
-        //     usbnc: usbnc1,
-        //     usbphy: usbphy1,
-        // };
+        let mut lpuart2: board::Lpuart2 = board::lpuart(lpuart2, pins.p14, pins.p15, 115200);
+        lpuart2.disable(|lpuart2| {
+            lpuart2.disable_fifo(lpuart::Direction::Tx);
+            lpuart2.disable_fifo(lpuart::Direction::Rx);
+            lpuart2.set_interrupts(lpuart::Interrupts::RECEIVE_FULL);
+            lpuart2.set_parity(None);
+        });
 
         let bus = BusAdapter::with_speed(usbd, &EP_MEMORY, &EP_STATE, SPEED);
         bus.set_interrupts(true);
@@ -128,28 +118,19 @@ mod app {
                 class,
                 device,
                 led,
-                // poller,
-                // timer,
                 message: MESSAGE.iter().cycle(),
+                lpuart2,
             },
         )
     }
 
-    // #[task(binds = BOARD_PIT, local = [poller, timer], priority = 1)]
-    // fn pit_interrupt(ctx: pit_interrupt::Context) {
-    //     while ctx.local.timer.is_elapsed() {
-    //         ctx.local.timer.clear_elapsed();
-    //     }
-
-    //     ctx.local.poller.poll();
-    // }
-
-    #[task(binds = USB_OTG1, local = [device, class, led, message, configured: bool = false], priority = 2)]
+    // #[task(binds = USB_OTG1, local = [device, class, led, message, configured: bool = false], priority = 2)]
+    #[task(binds = USB_OTG1, local = [device, class, message, configured: bool = false], priority = 2)]
     fn usb1(ctx: usb1::Context) {
         let usb1::LocalResources {
             class,
             device,
-            led,
+            // led,
             configured,
             message,
             ..
@@ -176,11 +157,11 @@ mod app {
             });
 
             if elapsed {
-                led.toggle();
-                let code = *message.next().unwrap();
-                if let Some(report) = translate_char(code) {
-                    class.push_input(&report).ok();
-                }
+                // led.toggle();
+                // let code = *message.next().unwrap();
+                // if let Some(report) = translate_char(code) {
+                //     class.push_input(&report).ok();
+                // }
             }
         }
     }
@@ -212,6 +193,33 @@ mod app {
             _ => {
                 log::error!("Unsupported character '{}'", ch);
                 None
+            }
+        }
+    }
+
+    #[task(binds = LPUART2, local = [lpuart2, led])]
+    fn lpuart2_interrupt(cx: lpuart2_interrupt::Context) {
+        use lpuart::Status;
+        let lpuart2 = cx.local.lpuart2;
+        let led = cx.local.led;
+
+        let status = lpuart2.status();
+        lpuart2.clear_status(Status::W1C);
+
+        // if lpuart2.status().contains(Status::TRANSMIT_EMPTY) {
+        //     lpuart2.write_byte(b'a');
+        // }
+
+        if status.contains(Status::RECEIVE_FULL) {
+            loop {
+                let data = lpuart2.read_data();
+                if data.flags().contains(lpuart::ReadFlags::RXEMPT) {
+                    break;
+                }
+                if lpuart2.status().contains(Status::TRANSMIT_EMPTY) {
+                    lpuart2.write_byte(data.into());
+                    led.toggle();
+                }
             }
         }
     }
