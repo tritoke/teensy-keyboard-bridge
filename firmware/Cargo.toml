@@ -1,5 +1,5 @@
 [package]
-name = "teensy-keyboard-bridge"
+name = "firmware"
 version = "0.1.0"
 edition = "2021"
 
@@ -10,10 +10,16 @@ rtic-monotonics = { version = "2", default-features = false, features = ["cortex
 teensy4-panic = { version = "0.2" }
 teensy4-bsp = { version = "0.5", features = [ "rt" ] }
 usb-device = "0.3"
-log = "0.4"
-usbd-hid = "0.8"
 usbd-serial = "0.2"
-circular-buffer = { version = "0.1.9", default-features = false }
+heapless = "0.8"
+
+# pinnded for consistency between crates
+# using a workspace broke rust-analyser ??? :(
+usbd-hid = "0.8.2"
+serde = { version = "1.0.216", default-features = false, features = ["derive"] }
+postcard = "1.1.1"
+
+shared = { path = "../shared" }
 
 [patch.crates-io.teensy4-bsp]
 git = "https://github.com/tritoke/teensy4-rs"
