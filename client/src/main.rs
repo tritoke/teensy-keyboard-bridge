@@ -1,20 +1,42 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, path::PathBuf};
 
+use argh::FromArgs;
 use color_eyre::eyre::{OptionExt, Result};
 use dialoguer::FuzzySelect;
-use evdev::{Device, InputEventKind, Key};
-use tokio::{select, io::AsyncWriteExt};
-use tokio_serial::{available_ports, SerialPortBuilderExt, SerialPortInfo, SerialPortType};
-use tokio_util::sync::CancellationToken;
-
 use enumflags2::{bitflags, BitFlag, BitFlags};
+use evdev::{Device, InputEventKind, Key};
+use tokio::{io::AsyncWriteExt, select};
+use tokio_serial::{available_ports, SerialPortBuilderExt, SerialPortType};
+use tokio_util::sync::CancellationToken;
 use usbd_hid::descriptor::{KeyboardReport, KeyboardUsage};
+
+/// Send keypresses to the teensy
+#[derive(FromArgs, Debug)]
+struct Args {
+    /// the keyboard device to read events from, usually a path like /dev/input/event4,
+    /// automatically determined if not specified
+    #[argh(option)]
+    keyboard: Option<PathBuf>,
+
+    /// the serial device to send events to, usually a path like /dev/ttyUSB0,
+    /// automatically determined if not specified
+    #[argh(option)]
+    send_to: Option<String>,
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let keyboard = select_input_device()?;
-    let SerialPortInfo { port_name, .. } = select_serial_port()?;
-    let mut serial_port = tokio_serial::new(port_name, 115200).open_native_async()?;
+    let args: Args = argh::from_env();
+
+    let keyboard = args
+        .keyboard
+        .map_or_else(select_input_device, Ok)
+        .and_then(|path| Ok(Device::open(path)?))?;
+
+    let mut serial_port = args
+        .send_to
+        .map_or_else(select_serial_port, Ok)
+        .and_then(|port_name| Ok(tokio_serial::new(port_name, 115200).open_native_async()?))?;
 
     let token = CancellationToken::new();
     let cloned_token = token.clone();
@@ -61,9 +83,9 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-fn select_input_device() -> Result<Device> {
+fn select_input_device() -> Result<PathBuf> {
     let mut keyboards = HashMap::new();
-    for (_, device) in evdev::enumerate() {
+    for (path, device) in evdev::enumerate() {
         // if it has an "A" key its probably a keyboard
         let supported = device
             .supported_keys()
@@ -73,7 +95,7 @@ fn select_input_device() -> Result<Device> {
         }
 
         let Some(name) = device.name() else { continue };
-        keyboards.insert(name.to_owned(), device);
+        keyboards.insert(name.to_owned(), path);
     }
 
     if keyboards.len() > 1 {
@@ -94,11 +116,11 @@ fn select_input_device() -> Result<Device> {
     }
 }
 
-fn select_serial_port() -> Result<SerialPortInfo> {
+fn select_serial_port() -> Result<String> {
     let mut ports = available_ports()?;
     ports.retain(|port| port.port_type != SerialPortType::Unknown);
 
-    if ports.len() > 1 {
+    let port = if ports.len() > 1 {
         let names: Vec<_> = ports.iter().map(|info| &info.port_name).collect();
         let selection = FuzzySelect::new()
             .with_prompt("Which serial port should I send events to?")
@@ -112,7 +134,9 @@ fn select_serial_port() -> Result<SerialPortInfo> {
             .ok_or_eyre("Selected serial port has fled the country?")
     } else {
         ports.into_iter().next().ok_or_eyre("No serial ports?")
-    }
+    };
+
+    Ok(port?.port_name)
 }
 
 #[rustfmt::skip]

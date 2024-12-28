@@ -4,16 +4,18 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-color-eyre = "0.6.3"
-dialoguer = { version = "0.11.0", default-features = false, features = ["fuzzy-select"] }
-tokio = { version = "1.42.0", features = ["full"] }
-tokio-serial = "5.4.4"
-tokio-util = { version = "0.7.13", features = ["full"] }
+color-eyre = "0.6"
+dialoguer = { version = "0.11", default-features = false, features = ["fuzzy-select"] }
+tokio = { version = "1.42", features = ["full"] }
+tokio-serial = "5.4"
+tokio-util = { version = "0.7", features = ["full"] }
 enumflags2 = { version = "0.7", features = ["serde"] }
-evdev = { version = "0.12.2", features = ["tokio"] }
+evdev = { version = "0.12", features = ["tokio"] }
+argh = { version = "0.1", default-features = false, features = ["help"] }
 
 # pinnded for consistency between crates
 # using a workspace broke rust-analyser ??? :(
+# this also makes doing
 serde = { version = "1.0.216", default-features = false, features = ["derive"] }
 usbd-hid = "0.8.2"
 postcard = "1.1.1"
