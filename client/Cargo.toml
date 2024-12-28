@@ -12,6 +12,7 @@ tokio-util = { version = "0.7", features = ["full"] }
 enumflags2 = { version = "0.7", features = ["serde"] }
 evdev = { version = "0.12", features = ["tokio"] }
 argh = { version = "0.1", default-features = false, features = ["help"] }
+termios = "0.3"
 
 # pinnded for consistency between crates
 # using a workspace broke rust-analyser ??? :(
@@ -21,4 +22,3 @@ usbd-hid = "0.8.2"
 postcard = "1.1.1"
 
 shared = { path = "../shared" }
-

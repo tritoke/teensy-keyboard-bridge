@@ -1,10 +1,11 @@
-use std::{collections::HashMap, path::PathBuf};
+use std::{collections::HashMap, os::fd::AsRawFd as _, path::PathBuf};
 
 use argh::FromArgs;
 use color_eyre::eyre::{OptionExt, Result};
 use dialoguer::FuzzySelect;
 use enumflags2::{bitflags, BitFlag, BitFlags};
 use evdev::{Device, InputEventKind, Key};
+use termios::{tcsetattr, Termios, TCSANOW};
 use tokio::{io::AsyncWriteExt, select};
 use tokio_serial::{available_ports, SerialPortBuilderExt, SerialPortType};
 use tokio_util::sync::CancellationToken;
@@ -35,8 +36,14 @@ async fn main() -> Result<()> {
 
     let mut serial_port = args
         .send_to
-        .map_or_else(select_serial_port, Ok)
-        .and_then(|port_name| Ok(tokio_serial::new(port_name, 115200).open_native_async()?))?;
+        .map_or_else(select_serial_port, Ok) .and_then(|port_name| Ok(tokio_serial::new(port_name, 115200).open_native_async()?))?;
+
+    println!("Setup device handle and serial port, disabling terminal echo.");
+    let stdin_fd = std::io::stdin().as_raw_fd();
+    let original_termios = Termios::from_fd(stdin_fd)?;
+    let mut termios = original_termios;
+    termios.c_lflag &= !termios::ECHO;
+    tcsetattr(stdin_fd, TCSANOW, &termios)?;
 
     let token = CancellationToken::new();
     let cloned_token = token.clone();
@@ -67,7 +74,7 @@ async fn main() -> Result<()> {
         };
 
         if cfg!(debug_assertions) {
-            eprintln!("\rstate = {keyboard_state:?}");
+            eprintln!("{keyboard_state:?}");
         }
 
         let report = shared::WhyNoDeriveDeserializeManSadFaceHere::from(keyboard_state);
@@ -79,6 +86,9 @@ async fn main() -> Result<()> {
     let report = KeyboardReport::default();
     let to_send = postcard::to_slice_cobs(&report, &mut buf)?;
     serial_port.write_all(to_send).await?;
+
+    println!("Stop requested - restoring original terminal properties.");
+    tcsetattr(stdin_fd, TCSANOW, &termios)?;
 
     Ok(())
 }
