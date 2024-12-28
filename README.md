@@ -36,3 +36,17 @@ cargo run --release
 ```
 
 It will pop up a dialog if there is ambiguity about what serial port to send over or what keyboard to read keypresses from.
+
+## Not on the same machine?
+
+`socat` once again saves the day :)
+
+On the machine with a keyboard we use socat to create a virtual serial port and forward it over TCP:
+```
+socat PTY,link=serial,rawer,b115200 TCP4:10.0.0.1:12345
+```
+
+On the machine with a serial port we use socat to create to listen on TCP and forward data over the serial port:
+```
+socat TCP-LISTEN:12345,fork,reuseaddr /dev/ttyUSB0,rawer,b115200
+```
