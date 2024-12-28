@@ -7,9 +7,9 @@ use enumflags2::{bitflags, BitFlag, BitFlags};
 use evdev::{Device, InputEventKind, Key};
 use termios::{tcsetattr, Termios, TCSANOW};
 use tokio::{io::AsyncWriteExt, select};
-use tokio_serial::{available_ports, SerialPortBuilderExt, SerialPortType};
+use tokio_serial::{available_ports, SerialPortBuilderExt, SerialPortType, SerialStream};
 use tokio_util::sync::CancellationToken;
-use usbd_hid::descriptor::{KeyboardReport, KeyboardUsage};
+use usbd_hid::descriptor::KeyboardUsage;
 
 /// Send keypresses to the teensy
 #[derive(FromArgs, Debug)]
@@ -34,9 +34,11 @@ async fn main() -> Result<()> {
         .map_or_else(select_input_device, Ok)
         .and_then(|path| Ok(Device::open(path)?))?;
 
-    let mut serial_port = args
+    let mut sender: KeypressSender = args
         .send_to
-        .map_or_else(select_serial_port, Ok) .and_then(|port_name| Ok(tokio_serial::new(port_name, 115200).open_native_async()?))?;
+        .map_or_else(select_serial_port, Ok)
+        .and_then(|port_name| Ok(tokio_serial::new(port_name, 115200).open_native_async()?))?
+        .into();
 
     println!("Setup device handle and serial port, disabling terminal echo.");
     let stdin_fd = std::io::stdin().as_raw_fd();
@@ -54,7 +56,6 @@ async fn main() -> Result<()> {
 
     let mut stream = keyboard.into_event_stream()?;
     let mut keyboard_state = KeySet::new();
-    let mut buf = [0; 32];
     loop {
         let event = select! {
             _ = token.cancelled() => break,
@@ -77,20 +78,37 @@ async fn main() -> Result<()> {
             eprintln!("{keyboard_state:?}");
         }
 
-        let report = shared::WhyNoDeriveDeserializeManSadFaceHere::from(keyboard_state);
-        let to_send = postcard::to_slice_cobs(&report, &mut buf)?;
-        serial_port.write_all(to_send).await?;
+        sender.send_state_update(keyboard_state).await?;
     }
 
     // we received Ctrl-C release all keys and exit
-    let report = KeyboardReport::default();
-    let to_send = postcard::to_slice_cobs(&report, &mut buf)?;
-    serial_port.write_all(to_send).await?;
+    sender.send_state_update(KeySet::default()).await?;
 
     println!("Stop requested - restoring original terminal properties.");
     tcsetattr(stdin_fd, TCSANOW, &termios)?;
 
     Ok(())
+}
+
+// a wrapper around a SerialStream to make sending keypresses easier
+struct KeypressSender {
+    serial_port: SerialStream,
+}
+
+impl From<SerialStream> for KeypressSender {
+    fn from(value: SerialStream) -> Self {
+        Self { serial_port: value }
+    }
+}
+
+impl KeypressSender {
+    async fn send_state_update(&mut self, new_state: KeySet) -> Result<()> {
+        let report = shared::WhyNoDeriveDeserializeManSadFaceHere::from(new_state);
+        let mut buf = [0; 32];
+        let to_send = postcard::to_slice_cobs(&report, &mut buf)?;
+        self.serial_port.write_all(to_send).await?;
+        Ok(())
+    }
 }
 
 fn select_input_device() -> Result<PathBuf> {
