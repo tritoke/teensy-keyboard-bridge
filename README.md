@@ -27,7 +27,7 @@ Connect the serial over USB to the teensy and whatever computer you want to send
 Now connect the teensy to the computer you want to send keypresses to.
 
 An example setup could look like this:
-[Image shows a teensy 4.1 connected to one computer via a USB cable and to another via a USB to serial cable](example.jpg)
+![Image shows a teensy 4.1 connected to one computer via a USB cable and to another via a USB to serial cable](example.jpg)
 
 You can now run the client:
 ```sh
