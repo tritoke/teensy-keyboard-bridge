@@ -30,8 +30,8 @@ mod app {
 
     /// Change me if you want to play with a full-speed USB device.
     const SPEED: Speed = Speed::High;
-    /// Matches whatever is in imxrt-log.
-    const VID_PID: UsbVidPid = UsbVidPid(0x5824, 0x27dd);
+    /// https://pid.codes/1209/C00B/
+    const VID_PID: UsbVidPid = UsbVidPid(0x1209, 0xC00B);
     const PRODUCT: &str = "teensy-keyboard-bridge";
     /// How frequently should we poll the logger?
     const LPUART_POLL_INTERVAL_MS: u32 = board::PERCLK_FREQUENCY / 1_000 * 100;
